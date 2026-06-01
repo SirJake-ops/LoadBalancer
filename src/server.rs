@@ -1,7 +1,9 @@
-use crate::config::LoadBalancerConfig;
-use std::io::{Read, Write};
-use std::net::TcpListener;
+use crate::config::{BackendConfig, LoadBalancerConfig};
+use crate::proxy::proxy_connection;
+use std::future::Future;
 use std::path::Path;
+use tokio::net::TcpListener;
+use tokio::task::JoinSet;
 
 pub struct LoadBalancer;
 
@@ -14,27 +16,202 @@ impl LoadBalancer {
         config_path: impl AsRef<Path>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let config = LoadBalancerConfig::from_file(config_path)?;
-        let listener = TcpListener::bind(config.listener_address)?;
+        let listener = TcpListener::bind(config.listener_address).await?;
+        let backend = config
+            .backend_list
+            .first()
+            .ok_or("config must include at least one backend")?
+            .clone();
+
         println!("Listening on {}", listener.local_addr()?);
+        Self::serve(listener, backend).await
+    }
+
+    pub(crate) async fn serve_until_shutdown(
+        listener: TcpListener,
+        backend: BackendConfig,
+        shutdown: impl Future<Output = std::io::Result<()>>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        tokio::pin!(shutdown);
+
+        let mut tasks = JoinSet::new();
 
         loop {
-            let (mut socket, _) = listener.accept()?;
-            tokio::spawn(async move {
-                let mut buf = vec![0; 1024];
+            tokio::select! {
+                accept_result = listener.accept() => {
+                    let (socket, client_addr) = accept_result?;
+                    let backend = backend.clone();
 
-                loop {
-                    match socket.read(&mut buf) {
-                        Ok(0) => return,
-                        Ok(n) => {
-                            println!("Received {} bytes", n);
-                            if socket.write_all(&buf[0..n]).is_err() {
-                                return;
-                            }
+                    println!("Accepted connection from {}", client_addr);
+
+                    tasks.spawn(async move {
+                        println!("Proxy connection started for {}", client_addr);
+
+                        if let Err(e) = proxy_connection(socket, backend).await {
+                            eprintln!("Proxy connection error for {}: {}", client_addr, e);
                         }
-                        Err(e) => println!("Error: {}", e),
-                    }
+
+                        println!("Proxy connection ended for {}", client_addr);
+                    });
                 }
-            });
+                shutdown_result = &mut shutdown => {
+                    shutdown_result?;
+                    println!("Shutdown signal received; stopping listener");
+                    break;
+                }
+            }
         }
+
+        while let Some(result) = tasks.join_next().await {
+            result?;
+        }
+
+        Ok(())
+    }
+
+    pub(crate) async fn serve(
+        listener: TcpListener,
+        backend: BackendConfig,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        Self::serve_until_shutdown(listener, backend, tokio::signal::ctrl_c()).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpStream};
+    use tokio::sync::oneshot;
+    use tokio::time::{Duration, timeout};
+
+    #[tokio::test]
+    async fn test_server_proxies_to_first_backend() {
+        let backend_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let backend_addr = backend_listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            let (mut backend_socket, _) = backend_listener.accept().await.unwrap();
+            let mut buffer = [0; 1024];
+            let bytes_read = backend_socket.read(&mut buffer).await.unwrap();
+            backend_socket
+                .write_all(&buffer[..bytes_read])
+                .await
+                .unwrap();
+        });
+
+        let server_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let server_addr = server_listener.local_addr().unwrap();
+        let backend = BackendConfig {
+            backend_address: backend_addr,
+            backend_id: "backend-1".to_string(),
+            weight: None,
+        };
+
+        let server_task = tokio::spawn(async move {
+            let _ = LoadBalancer::serve(server_listener, backend).await;
+        });
+
+        let test_result = timeout(Duration::from_secs(2), async {
+            let mut client = TcpStream::connect(server_addr).await.unwrap();
+            client.write_all(b"ping").await.unwrap();
+
+            let mut response = [0; 4];
+            client.read_exact(&mut response).await.unwrap();
+
+            assert_eq!(&response, b"ping");
+        })
+        .await;
+
+        server_task.abort();
+        test_result.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_server_handles_multiple_connections() {
+        let backend_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let backend_addr = backend_listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            loop {
+                let (mut backend_socket, _) = backend_listener.accept().await.unwrap();
+
+                tokio::spawn(async move {
+                    let mut buffer = [0; 1024];
+                    let bytes_read = backend_socket.read(&mut buffer).await.unwrap();
+                    backend_socket
+                        .write_all(&buffer[..bytes_read])
+                        .await
+                        .unwrap();
+                });
+            }
+        });
+
+        let server_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let server_addr = server_listener.local_addr().unwrap();
+        let backend = BackendConfig {
+            backend_address: backend_addr,
+            backend_id: "backend-1".to_string(),
+            weight: None,
+        };
+
+        let server_task = tokio::spawn(async move {
+            let _ = LoadBalancer::serve(server_listener, backend).await;
+        });
+
+        let test_result = timeout(Duration::from_secs(2), async {
+            let first_client = async {
+                let mut client = TcpStream::connect(server_addr).await.unwrap();
+                client.write_all(b"ping").await.unwrap();
+
+                let mut response = [0; 4];
+                client.read_exact(&mut response).await.unwrap();
+                assert_eq!(&response, b"ping");
+            };
+
+            let second_client = async {
+                let mut client = TcpStream::connect(server_addr).await.unwrap();
+                client.write_all(b"pong").await.unwrap();
+
+                let mut response = [0; 4];
+                client.read_exact(&mut response).await.unwrap();
+                assert_eq!(&response, b"pong");
+            };
+
+            tokio::join!(first_client, second_client);
+        })
+        .await;
+
+        server_task.abort();
+        test_result.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_server_stops_accepting_on_shutdown() {
+        let server_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let server_addr = server_listener.local_addr().unwrap();
+        let backend = BackendConfig {
+            backend_address: "127.0.0.1:1".parse().unwrap(),
+            backend_id: "backend-1".to_string(),
+            weight: None,
+        };
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+
+        let shutdown_driver = async {
+            TcpStream::connect(server_addr).await.unwrap();
+            shutdown_tx.send(()).unwrap();
+        };
+
+        let server = LoadBalancer::serve_until_shutdown(server_listener, backend, async {
+            shutdown_rx.await.map_err(std::io::Error::other)
+        });
+
+        let shutdown_result = timeout(Duration::from_secs(2), async {
+            tokio::join!(server, shutdown_driver).0
+        })
+        .await
+        .unwrap();
+
+        assert!(shutdown_result.is_ok());
     }
 }
