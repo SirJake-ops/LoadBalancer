@@ -1,7 +1,9 @@
 use crate::config::{BackendConfig, LoadBalancerConfig};
 use crate::proxy::proxy_connection;
+use std::future::Future;
 use std::path::Path;
 use tokio::net::TcpListener;
+use tokio::task::JoinSet;
 
 pub struct LoadBalancer;
 
@@ -25,26 +27,53 @@ impl LoadBalancer {
         Self::serve(listener, backend).await
     }
 
+    pub(crate) async fn serve_until_shutdown(
+        listener: TcpListener,
+        backend: BackendConfig,
+        shutdown: impl Future<Output = std::io::Result<()>>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        tokio::pin!(shutdown);
+
+        let mut tasks = JoinSet::new();
+
+        loop {
+            tokio::select! {
+                accept_result = listener.accept() => {
+                    let (socket, client_addr) = accept_result?;
+                    let backend = backend.clone();
+
+                    println!("Accepted connection from {}", client_addr);
+
+                    tasks.spawn(async move {
+                        println!("Proxy connection started for {}", client_addr);
+
+                        if let Err(e) = proxy_connection(socket, backend).await {
+                            eprintln!("Proxy connection error for {}: {}", client_addr, e);
+                        }
+
+                        println!("Proxy connection ended for {}", client_addr);
+                    });
+                }
+                shutdown_result = &mut shutdown => {
+                    shutdown_result?;
+                    println!("Shutdown signal received; stopping listener");
+                    break;
+                }
+            }
+        }
+
+        while let Some(result) = tasks.join_next().await {
+            result?;
+        }
+
+        Ok(())
+    }
+
     pub(crate) async fn serve(
         listener: TcpListener,
         backend: BackendConfig,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        loop {
-            let (socket, client_addr) = listener.accept().await?;
-            let backend = backend.clone();
-
-            println!("Accepted connection from {}", client_addr);
-
-            tokio::spawn(async move {
-                println!("Proxy connection started for {}", client_addr);
-
-                if let Err(e) = proxy_connection(socket, backend).await {
-                    eprintln!("Proxy connection error for {}: {}", client_addr, e);
-                }
-
-                println!("Proxy connection ended for {}", client_addr);
-            });
-        }
+        Self::serve_until_shutdown(listener, backend, tokio::signal::ctrl_c()).await
     }
 }
 
@@ -53,6 +82,7 @@ mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, TcpStream};
+    use tokio::sync::oneshot;
     use tokio::time::{Duration, timeout};
 
     #[tokio::test]
@@ -154,5 +184,34 @@ mod tests {
 
         server_task.abort();
         test_result.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_server_stops_accepting_on_shutdown() {
+        let server_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let server_addr = server_listener.local_addr().unwrap();
+        let backend = BackendConfig {
+            backend_address: "127.0.0.1:1".parse().unwrap(),
+            backend_id: "backend-1".to_string(),
+            weight: None,
+        };
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+
+        let shutdown_driver = async {
+            TcpStream::connect(server_addr).await.unwrap();
+            shutdown_tx.send(()).unwrap();
+        };
+
+        let server = LoadBalancer::serve_until_shutdown(server_listener, backend, async {
+            shutdown_rx.await.map_err(std::io::Error::other)
+        });
+
+        let shutdown_result = timeout(Duration::from_secs(2), async {
+            tokio::join!(server, shutdown_driver).0
+        })
+        .await
+        .unwrap();
+
+        assert!(shutdown_result.is_ok());
     }
 }
