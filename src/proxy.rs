@@ -7,6 +7,7 @@ pub async fn proxy_connection(
     backend: BackendConfig,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut backend_stream = TcpStream::connect(backend.backend_address).await?;
+    println!("Connected to backend {}", backend.backend_id);
     io::copy_bidirectional(&mut client_stream, &mut backend_stream).await?;
 
     Ok(())

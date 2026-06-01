@@ -30,13 +30,19 @@ impl LoadBalancer {
         backend: BackendConfig,
     ) -> Result<(), Box<dyn std::error::Error>> {
         loop {
-            let (socket, _) = listener.accept().await?;
+            let (socket, client_addr) = listener.accept().await?;
             let backend = backend.clone();
 
+            println!("Accepted connection from {}", client_addr);
+
             tokio::spawn(async move {
+                println!("Proxy connection started for {}", client_addr);
+
                 if let Err(e) = proxy_connection(socket, backend).await {
-                    eprintln!("Proxy connection error: {}", e);
+                    eprintln!("Proxy connection error for {}: {}", client_addr, e);
                 }
+
+                println!("Proxy connection ended for {}", client_addr);
             });
         }
     }
