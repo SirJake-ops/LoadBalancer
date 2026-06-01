@@ -1,0 +1,16 @@
+listener_address = "127.0.0.1:8080"
+strategy = "round_robin"
+
+[[backend_list]]
+backend_address = "127.0.0.1:8081"
+backend_id = "1"
+weight = 1
+
+[[backend_list]]
+backend_address = "127.0.0.1:8082"
+backend_id = "2"
+weight = 2
+
+[health_check_interval]
+interval_seconds = 10
+timeout_seconds = 5
