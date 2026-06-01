@@ -1,7 +1,7 @@
 use crate::config::LoadBalancerConfig;
-use std::io::{Read, Write};
-use std::net::TcpListener;
+use crate::proxy::proxy_connection;
 use std::path::Path;
+use tokio::net::TcpListener;
 
 pub struct LoadBalancer;
 
@@ -14,25 +14,22 @@ impl LoadBalancer {
         config_path: impl AsRef<Path>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let config = LoadBalancerConfig::from_file(config_path)?;
-        let listener = TcpListener::bind(config.listener_address)?;
+        let listener = TcpListener::bind(config.listener_address).await?;
+        let backend = config
+            .backend_list
+            .first()
+            .ok_or("config must include at least one backend")?
+            .clone();
+
         println!("Listening on {}", listener.local_addr()?);
 
         loop {
-            let (mut socket, _) = listener.accept()?;
-            tokio::spawn(async move {
-                let mut buf = vec![0; 1024];
+            let (socket, _) = listener.accept().await?;
+            let backend = backend.clone();
 
-                loop {
-                    match socket.read(&mut buf) {
-                        Ok(0) => return,
-                        Ok(n) => {
-                            println!("Received {} bytes", n);
-                            if socket.write_all(&buf[0..n]).is_err() {
-                                return;
-                            }
-                        }
-                        Err(e) => println!("Error: {}", e),
-                    }
+            tokio::spawn(async move {
+                if let Err(e) = proxy_connection(socket, backend).await {
+                    eprintln!("Proxy connection error: {}", e);
                 }
             });
         }
