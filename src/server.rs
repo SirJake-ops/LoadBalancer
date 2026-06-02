@@ -1,4 +1,5 @@
 use crate::config::{BackendConfig, LoadBalancerConfig};
+use crate::pool::ProxyPool;
 use crate::proxy::proxy_connection;
 use std::future::Future;
 use std::path::Path;
@@ -24,12 +25,13 @@ impl LoadBalancer {
             .clone();
 
         println!("Listening on {}", listener.local_addr()?);
-        Self::serve(listener, backend).await
+        Self::serve(listener, backend, ProxyPool::new()).await
     }
 
     pub(crate) async fn serve_until_shutdown(
         listener: TcpListener,
         backend: BackendConfig,
+        pool: ProxyPool,
         shutdown: impl Future<Output = std::io::Result<()>>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         tokio::pin!(shutdown);
@@ -39,20 +41,34 @@ impl LoadBalancer {
         loop {
             tokio::select! {
                 accept_result = listener.accept() => {
-                    let (socket, client_addr) = accept_result?;
-                    let backend = backend.clone();
+                    match accept_result {
+                        Ok((socket, client_addr)) => {
+                            let backend = backend.clone();
+                            println!("Accepted connection from {}", client_addr);
 
-                    println!("Accepted connection from {}", client_addr);
+                            match pool.try_acquire() {
+                                Some(guard) => {
+                                    tasks.spawn(async move {
+                                        let _pool_slot = guard;
 
-                    tasks.spawn(async move {
-                        println!("Proxy connection started for {}", client_addr);
+                                        println!("Proxy connection started for {}", client_addr);
 
-                        if let Err(e) = proxy_connection(socket, backend).await {
-                            eprintln!("Proxy connection error for {}: {}", client_addr, e);
+                                        if let Err(e) = proxy_connection(socket, backend).await {
+                                            eprintln!("Proxy connection error for {}: {}", client_addr, e);
+                                        }
+
+                                        println!("Proxy connection ended for {}", client_addr);
+                                    });
+                                }
+                                None => {
+                                    eprintln!("Proxy pool full! Rejecting client connection from {}", client_addr);
+                                }
+                            }
                         }
-
-                        println!("Proxy connection ended for {}", client_addr);
-                    });
+                        Err(e) => {
+                            eprintln!("Failed to accept incoming connection: {}", e);
+                        }
+                    }
                 }
                 shutdown_result = &mut shutdown => {
                     shutdown_result?;
@@ -72,8 +88,9 @@ impl LoadBalancer {
     pub(crate) async fn serve(
         listener: TcpListener,
         backend: BackendConfig,
+        pool: ProxyPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        Self::serve_until_shutdown(listener, backend, tokio::signal::ctrl_c()).await
+        Self::serve_until_shutdown(listener, backend, pool, tokio::signal::ctrl_c()).await
     }
 }
 
@@ -108,8 +125,9 @@ mod tests {
             weight: None,
         };
 
+        let pool = ProxyPool::with_max_connections(1);
         let server_task = tokio::spawn(async move {
-            let _ = LoadBalancer::serve(server_listener, backend).await;
+            let _ = LoadBalancer::serve(server_listener, backend, pool).await;
         });
 
         let test_result = timeout(Duration::from_secs(2), async {
@@ -155,8 +173,9 @@ mod tests {
             weight: None,
         };
 
+        let pool = ProxyPool::with_max_connections(2);
         let server_task = tokio::spawn(async move {
-            let _ = LoadBalancer::serve(server_listener, backend).await;
+            let _ = LoadBalancer::serve(server_listener, backend, pool).await;
         });
 
         let test_result = timeout(Duration::from_secs(2), async {
@@ -202,7 +221,8 @@ mod tests {
             shutdown_tx.send(()).unwrap();
         };
 
-        let server = LoadBalancer::serve_until_shutdown(server_listener, backend, async {
+        let pool = ProxyPool::with_max_connections(1);
+        let server = LoadBalancer::serve_until_shutdown(server_listener, backend, pool, async {
             shutdown_rx.await.map_err(std::io::Error::other)
         });
 
