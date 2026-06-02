@@ -131,6 +131,24 @@ impl BackendPool {
             .find(|backend| backend.config.backend_id == backend_id)
             .map(|backend| backend.active_connections)
     }
+
+    pub fn try_acquire(&self, backend_id: &str) -> Option<BackendGuard> {
+        let mut state = self.inner.lock().unwrap();
+        let backend = state
+            .iter_mut()
+            .find(|backend| backend.config.backend_id == backend_id)?;
+
+        if !backend.healthy {
+            return None;
+        }
+
+        backend.active_connections += 1;
+
+        Some(BackendGuard {
+            inner: self.inner.clone(),
+            backend_id: backend.config.backend_id.clone(),
+        })
+    }
 }
 
 pub struct PoolGuard {
@@ -142,6 +160,28 @@ impl Drop for PoolGuard {
         let mut state = self.inner.lock().unwrap();
         if state.active_connections > 0 {
             state.active_connections -= 1;
+        }
+    }
+}
+
+pub struct BackendGuard {
+    inner: Arc<Mutex<Vec<BackendState>>>,
+    backend_id: String,
+}
+
+impl Drop for BackendGuard {
+    fn drop(&mut self) {
+        let mut state = self.inner.lock().unwrap();
+
+        if let Some(backend) = state
+            .iter_mut()
+            .find(|backend| backend.config.backend_id == self.backend_id)
+        {
+            if backend.active_connections > 0 {
+                backend.active_connections -= 1;
+            }
+        } else {
+            return;
         }
     }
 }
