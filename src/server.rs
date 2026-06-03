@@ -1,4 +1,5 @@
-use crate::config::{BackendConfig, LoadBalancerConfig};
+use crate::config::LoadBalancerConfig;
+use crate::pool::BackendPool;
 use crate::proxy::proxy_connection;
 use std::future::Future;
 use std::path::Path;
@@ -17,19 +18,20 @@ impl LoadBalancer {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let config = LoadBalancerConfig::from_file(config_path)?;
         let listener = TcpListener::bind(config.listener_address).await?;
-        let backend = config
-            .backend_list
-            .first()
-            .ok_or("config must include at least one backend")?
-            .clone();
+
+        if config.backend_list.is_empty() {
+            return Err("config must include at least one backend".into());
+        }
+
+        let backend_pool = BackendPool::new(config.backend_list);
 
         println!("Listening on {}", listener.local_addr()?);
-        Self::serve(listener, backend).await
+        Self::serve(listener, backend_pool).await
     }
 
     pub(crate) async fn serve_until_shutdown(
         listener: TcpListener,
-        backend: BackendConfig,
+        pool: BackendPool,
         shutdown: impl Future<Output = std::io::Result<()>>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         tokio::pin!(shutdown);
@@ -39,20 +41,41 @@ impl LoadBalancer {
         loop {
             tokio::select! {
                 accept_result = listener.accept() => {
-                    let (socket, client_addr) = accept_result?;
-                    let backend = backend.clone();
+                    match accept_result {
+                        Ok((socket, client_addr)) => {
+                            let healthy_backends = pool.healthy_backends();
 
-                    println!("Accepted connection from {}", client_addr);
+                            if healthy_backends.is_empty() {
+                                println!("No healthy backends found");
+                                continue;
+                            }
 
-                    tasks.spawn(async move {
-                        println!("Proxy connection started for {}", client_addr);
+                            let backend = healthy_backends.first().unwrap().clone();
+                            println!("Accepted connection from {}", client_addr);
 
-                        if let Err(e) = proxy_connection(socket, backend).await {
-                            eprintln!("Proxy connection error for {}: {}", client_addr, e);
+                            match pool.try_acquire(&backend.backend_id) {
+                                Some(guard) => {
+                                    tasks.spawn(async move {
+                                        let _pool_slot = guard;
+
+                                        println!("Proxy connection started for {}", client_addr);
+
+                                        if let Err(e) = proxy_connection(socket, backend).await {
+                                            eprintln!("Proxy connection error for {}: {}", client_addr, e);
+                                        }
+
+                                        println!("Proxy connection ended for {}", client_addr);
+                                    });
+                                }
+                                None => {
+                                    eprintln!("Backend unavailable! Rejecting client connection from {}", client_addr);
+                                }
+                            }
                         }
-
-                        println!("Proxy connection ended for {}", client_addr);
-                    });
+                        Err(e) => {
+                            eprintln!("Failed to accept incoming connection: {}", e);
+                        }
+                    }
                 }
                 shutdown_result = &mut shutdown => {
                     shutdown_result?;
@@ -71,15 +94,16 @@ impl LoadBalancer {
 
     pub(crate) async fn serve(
         listener: TcpListener,
-        backend: BackendConfig,
+        pool: BackendPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        Self::serve_until_shutdown(listener, backend, tokio::signal::ctrl_c()).await
+        Self::serve_until_shutdown(listener, pool, tokio::signal::ctrl_c()).await
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::BackendConfig;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, TcpStream};
     use tokio::sync::oneshot;
@@ -108,8 +132,9 @@ mod tests {
             weight: None,
         };
 
+        let pool = BackendPool::new(vec![backend.clone()]);
         let server_task = tokio::spawn(async move {
-            let _ = LoadBalancer::serve(server_listener, backend).await;
+            let _ = LoadBalancer::serve(server_listener, pool).await;
         });
 
         let test_result = timeout(Duration::from_secs(2), async {
@@ -155,8 +180,9 @@ mod tests {
             weight: None,
         };
 
+        let pool = BackendPool::new(vec![backend.clone()]);
         let server_task = tokio::spawn(async move {
-            let _ = LoadBalancer::serve(server_listener, backend).await;
+            let _ = LoadBalancer::serve(server_listener, pool).await;
         });
 
         let test_result = timeout(Duration::from_secs(2), async {
@@ -202,7 +228,8 @@ mod tests {
             shutdown_tx.send(()).unwrap();
         };
 
-        let server = LoadBalancer::serve_until_shutdown(server_listener, backend, async {
+        let pool = BackendPool::new(vec![backend.clone()]);
+        let server = LoadBalancer::serve_until_shutdown(server_listener, pool, async {
             shutdown_rx.await.map_err(std::io::Error::other)
         });
 
