@@ -1,5 +1,5 @@
-use crate::config::{BackendConfig, LoadBalancerConfig};
-use crate::pool::ProxyPool;
+use crate::config::LoadBalancerConfig;
+use crate::pool::BackendPool;
 use crate::proxy::proxy_connection;
 use std::future::Future;
 use std::path::Path;
@@ -18,20 +18,20 @@ impl LoadBalancer {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let config = LoadBalancerConfig::from_file(config_path)?;
         let listener = TcpListener::bind(config.listener_address).await?;
-        let backend = config
-            .backend_list
-            .first()
-            .ok_or("config must include at least one backend")?
-            .clone();
+
+        if config.backend_list.is_empty() {
+            return Err("config must include at least one backend".into());
+        }
+
+        let backend_pool = BackendPool::new(config.backend_list);
 
         println!("Listening on {}", listener.local_addr()?);
-        Self::serve(listener, backend, ProxyPool::new()).await
+        Self::serve(listener, backend_pool).await
     }
 
     pub(crate) async fn serve_until_shutdown(
         listener: TcpListener,
-        backend: BackendConfig,
-        pool: ProxyPool,
+        pool: BackendPool,
         shutdown: impl Future<Output = std::io::Result<()>>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         tokio::pin!(shutdown);
@@ -43,10 +43,17 @@ impl LoadBalancer {
                 accept_result = listener.accept() => {
                     match accept_result {
                         Ok((socket, client_addr)) => {
-                            let backend = backend.clone();
+                            let healthy_backends = pool.healthy_backends();
+
+                            if healthy_backends.is_empty() {
+                                println!("No healthy backends found");
+                                continue;
+                            }
+
+                            let backend = healthy_backends.first().unwrap().clone();
                             println!("Accepted connection from {}", client_addr);
 
-                            match pool.try_acquire() {
+                            match pool.try_acquire(&backend.backend_id) {
                                 Some(guard) => {
                                     tasks.spawn(async move {
                                         let _pool_slot = guard;
@@ -61,7 +68,7 @@ impl LoadBalancer {
                                     });
                                 }
                                 None => {
-                                    eprintln!("Proxy pool full! Rejecting client connection from {}", client_addr);
+                                    eprintln!("Backend unavailable! Rejecting client connection from {}", client_addr);
                                 }
                             }
                         }
@@ -87,16 +94,16 @@ impl LoadBalancer {
 
     pub(crate) async fn serve(
         listener: TcpListener,
-        backend: BackendConfig,
-        pool: ProxyPool,
+        pool: BackendPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        Self::serve_until_shutdown(listener, backend, pool, tokio::signal::ctrl_c()).await
+        Self::serve_until_shutdown(listener, pool, tokio::signal::ctrl_c()).await
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::BackendConfig;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, TcpStream};
     use tokio::sync::oneshot;
@@ -125,9 +132,9 @@ mod tests {
             weight: None,
         };
 
-        let pool = ProxyPool::with_max_connections(1);
+        let pool = BackendPool::new(vec![backend.clone()]);
         let server_task = tokio::spawn(async move {
-            let _ = LoadBalancer::serve(server_listener, backend, pool).await;
+            let _ = LoadBalancer::serve(server_listener, pool).await;
         });
 
         let test_result = timeout(Duration::from_secs(2), async {
@@ -173,9 +180,9 @@ mod tests {
             weight: None,
         };
 
-        let pool = ProxyPool::with_max_connections(2);
+        let pool = BackendPool::new(vec![backend.clone()]);
         let server_task = tokio::spawn(async move {
-            let _ = LoadBalancer::serve(server_listener, backend, pool).await;
+            let _ = LoadBalancer::serve(server_listener, pool).await;
         });
 
         let test_result = timeout(Duration::from_secs(2), async {
@@ -221,8 +228,8 @@ mod tests {
             shutdown_tx.send(()).unwrap();
         };
 
-        let pool = ProxyPool::with_max_connections(1);
-        let server = LoadBalancer::serve_until_shutdown(server_listener, backend, pool, async {
+        let pool = BackendPool::new(vec![backend.clone()]);
+        let server = LoadBalancer::serve_until_shutdown(server_listener, pool, async {
             shutdown_rx.await.map_err(std::io::Error::other)
         });
 
