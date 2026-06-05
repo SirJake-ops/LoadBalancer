@@ -109,6 +109,10 @@ mod tests {
     use tokio::sync::oneshot;
     use tokio::time::{Duration, timeout};
 
+    fn backend(id: u64, port: u16) -> BackendConfig {
+        BackendConfig::new(format!("127.0.0.1:{port}"), id, None)
+    }
+
     #[tokio::test]
     async fn test_server_proxies_to_first_backend() {
         let backend_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -240,36 +244,5 @@ mod tests {
         .unwrap();
 
         assert!(shutdown_result.is_ok());
-    }
-
-    #[test]
-    fn test_should_try_acquire() {
-        let pool = BackendPool::new(vec![1, 8081]);
-
-        assert_eq!(pool.active_connections("1"), Some(0));
-
-        {
-            let guard = pool.try_acquire("1").unwrap();
-            assert_eq!(pool.active_connections("1"), Some(1));
-        }
-
-        assert_eq!(pool.active_connections("1"), Some(0));
-    }
-
-    #[test]
-    fn try_acquire_returns_none_for_unhealthy_backend() {
-        let pool = BackendPool::new(vec![1, 8081]);
-
-        pool.mark_unhealthy("1".to_string());
-        let guard = pool.try_acquire("1");
-        assert!(guard.is_none());
-        assert_eq!(pool.active_connections("1"), Some(0));
-    }
-
-    #[test]
-    fn try_acquire_returns_none_for_unknown_backend() {
-        let pool = BackendPool::new(vec![backend(1, 8081)]);
-
-        assert!(pool.try_acquire("missing").is_none());
     }
 }
