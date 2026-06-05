@@ -260,4 +260,35 @@ mod tests {
 
         assert_eq!(pool.active_connections("1"), Some(0));
     }
+
+    #[test]
+    fn try_acquire_increments_active_connections_until_guard_is_dropped() {
+        let pool = BackendPool::new(vec![backend(1, 8081)]);
+
+        assert_eq!(pool.active_connections("1"), Some(0));
+
+        {
+            let _guard = pool.try_acquire("1").unwrap();
+            assert_eq!(pool.active_connections("1"), Some(1));
+        }
+
+        assert_eq!(pool.active_connections("1"), Some(0));
+    }
+
+    #[test]
+    fn try_acquire_returns_none_for_unhealthy_backend() {
+        let pool = BackendPool::new(vec![backend(1, 8081)]);
+
+        pool.mark_unhealthy("1".to_string());
+        let guard = pool.try_acquire("1");
+        assert!(guard.is_none());
+        assert_eq!(pool.active_connections("1"), Some(0));
+    }
+
+    #[test]
+    fn try_acquire_returns_none_for_unknown_backend() {
+        let pool = BackendPool::new(vec![backend(1, 8081)]);
+
+        assert!(pool.try_acquire("missing").is_none());
+    }
 }
