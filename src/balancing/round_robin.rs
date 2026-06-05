@@ -36,7 +36,7 @@ mod tests {
     }
 
     #[test]
-    pub fn should_select_strategy() {
+    pub fn selects_backends_in_round_robin_order() {
         let mut round_robin = RoundRobin::new();
         let backends = vec![backend(1, 8081), backend(2, 8082)];
 
@@ -54,5 +54,29 @@ mod tests {
             round_robin.select_backend(&backends).unwrap().backend_id,
             "1",
         );
+    }
+
+    #[test]
+    pub fn selects_only_from_provided_healthy_candidates() {
+        let mut round_robin = RoundRobin::new();
+        let backends = vec![backend(1, 8081), backend(3, 8083)];
+        assert_eq!(
+            round_robin.select_backend(&backends).unwrap().backend_id,
+            "1"
+        );
+        assert_eq!(
+            round_robin.select_backend(&backends).unwrap().backend_id,
+            "3"
+        );
+    }
+
+    #[test]
+    pub fn returns_error_when_no_candidates_exist() {
+        let mut round_robin = RoundRobin::new();
+        let backends = Vec::new();
+
+        let result = round_robin.select_backend(&backends);
+
+        assert!(matches!(result, Err(BalanceError::NoBackendsAvailable)));
     }
 }
