@@ -1,6 +1,6 @@
 # Rust Load Balancer
 
-A learning-focused TCP load balancer written in Rust with Tokio. The project currently supports a transparent single-backend proxy path, TOML configuration, per-connection Tokio tasks, and graceful shutdown handling.
+TCP load balancer written in Rust with Tokio. The project currently supports a transparent single-backend proxy path, TOML configuration, per-connection Tokio tasks, and graceful shutdown handling.
 
 The longer-term goal is to grow this into a configurable load balancer with backend pool state, health checks, and pluggable balancing strategies such as round-robin and least-connections.
 
