@@ -1,4 +1,5 @@
-mod round_robin;
+pub mod round_robin;
+pub use round_robin::RoundRobin;
 
 use crate::config::BackendConfig;
 

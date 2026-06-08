@@ -1,3 +1,4 @@
+use crate::balancing::{BalancingStrategy, RoundRobin};
 use crate::config::LoadBalancerConfig;
 use crate::pool::BackendPool;
 use crate::proxy::proxy_connection;
@@ -37,6 +38,7 @@ impl LoadBalancer {
         tokio::pin!(shutdown);
 
         let mut tasks = JoinSet::new();
+        let mut strategy = RoundRobin::new();
 
         loop {
             tokio::select! {
@@ -50,7 +52,14 @@ impl LoadBalancer {
                                 continue;
                             }
 
-                            let backend = healthy_backends.first().unwrap().clone();
+                            let backend = match strategy.select_backend(&healthy_backends) {
+                                Ok(backend) => backend,
+                                Err(_) => {
+                                    eprintln!("No healthy backends");
+                                    continue;
+                                }
+                            };
+
                             println!("Accepted connection from {}", client_addr);
 
                             match pool.try_acquire(&backend.backend_id) {
