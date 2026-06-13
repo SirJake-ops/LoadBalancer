@@ -45,14 +45,14 @@ impl LoadBalancer {
                 accept_result = listener.accept() => {
                     match accept_result {
                         Ok((socket, client_addr)) => {
-                            let healthy_backends = pool.healthy_backends();
+                            let candidates = pool.healthy_candidates();
 
-                            if healthy_backends.is_empty() {
+                            if candidates.is_empty() {
                                 println!("No healthy backends found");
                                 continue;
                             }
 
-                            let backend = match strategy.select_backend(&healthy_backends) {
+                            let backend = match strategy.select_backend(&candidates) {
                                 Ok(backend) => backend,
                                 Err(_) => {
                                     eprintln!("No healthy backends");
@@ -60,7 +60,10 @@ impl LoadBalancer {
                                 }
                             };
 
-                            println!("Accepted connection from {}", client_addr);
+                            println!(
+                                "Accepted connection from {}; selected backend {}",
+                                client_addr, backend.backend_id
+                            );
 
                             match pool.try_acquire(&backend.backend_id) {
                                 Some(guard) => {
@@ -158,6 +161,64 @@ mod tests {
             client.read_exact(&mut response).await.unwrap();
 
             assert_eq!(&response, b"ping");
+        })
+        .await;
+
+        server_task.abort();
+        test_result.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_server_routes_connections_round_robin_across_backends() {
+        let first_backend_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let first_backend_addr = first_backend_listener.local_addr().unwrap();
+        let second_backend_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let second_backend_addr = second_backend_listener.local_addr().unwrap();
+
+        async fn respond_once(listener: TcpListener, response: &'static [u8]) {
+            let (mut backend_socket, _) = listener.accept().await.unwrap();
+            let mut buffer = [0; 1024];
+            let _ = backend_socket.read(&mut buffer).await.unwrap();
+            backend_socket.write_all(response).await.unwrap();
+        }
+
+        tokio::spawn(respond_once(first_backend_listener, b"one"));
+        tokio::spawn(respond_once(second_backend_listener, b"two"));
+
+        let server_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let server_addr = server_listener.local_addr().unwrap();
+        let pool = BackendPool::new(vec![
+            BackendConfig {
+                backend_address: first_backend_addr,
+                backend_id: "backend-1".to_string(),
+                weight: None,
+            },
+            BackendConfig {
+                backend_address: second_backend_addr,
+                backend_id: "backend-2".to_string(),
+                weight: None,
+            },
+        ]);
+
+        let server_task = tokio::spawn(async move {
+            let _ = LoadBalancer::serve(server_listener, pool).await;
+        });
+
+        let test_result = timeout(Duration::from_secs(2), async {
+            let mut first_client = TcpStream::connect(server_addr).await.unwrap();
+            first_client.write_all(b"ping").await.unwrap();
+            let mut first_response = [0; 3];
+            first_client.read_exact(&mut first_response).await.unwrap();
+            assert_eq!(&first_response, b"one");
+
+            let mut second_client = TcpStream::connect(server_addr).await.unwrap();
+            second_client.write_all(b"ping").await.unwrap();
+            let mut second_response = [0; 3];
+            second_client
+                .read_exact(&mut second_response)
+                .await
+                .unwrap();
+            assert_eq!(&second_response, b"two");
         })
         .await;
 

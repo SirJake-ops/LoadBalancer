@@ -54,6 +54,12 @@ impl BackendConfig {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct BackendCandidate {
+    pub backend: BackendConfig,
+    pub active_connections: usize,
+}
+
 #[derive(Debug, serde::Deserialize, Clone, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum StrategyKind {

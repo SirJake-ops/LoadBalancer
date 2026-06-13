@@ -1,4 +1,4 @@
-use crate::config::BackendConfig;
+use crate::config::{BackendCandidate, BackendConfig};
 use std::sync::{Arc, Mutex};
 
 #[derive(Debug)]
@@ -85,6 +85,18 @@ impl BackendPool {
             .iter()
             .filter(|backend| backend.healthy)
             .map(|backend| backend.config.clone())
+            .collect()
+    }
+
+    pub fn healthy_candidates(&self) -> Vec<BackendCandidate> {
+        let state = self.inner.lock().unwrap();
+        state
+            .iter()
+            .filter(|backend| backend.healthy)
+            .map(|backend| BackendCandidate {
+                backend: backend.config.clone(),
+                active_connections: backend.active_connections,
+            })
             .collect()
     }
 

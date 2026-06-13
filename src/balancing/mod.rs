@@ -1,7 +1,10 @@
+mod least_connections;
 pub mod round_robin;
+
+pub use least_connections::LeastConnections;
 pub use round_robin::RoundRobin;
 
-use crate::config::BackendConfig;
+use crate::config::{BackendCandidate, BackendConfig};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BalanceError {
@@ -11,7 +14,7 @@ pub enum BalanceError {
 pub trait BalancingStrategy {
     fn select_backend(
         &mut self,
-        candidates: &[BackendConfig],
+        candidates: &[BackendCandidate],
     ) -> Result<BackendConfig, BalanceError>;
 }
 
@@ -19,8 +22,11 @@ pub trait BalancingStrategy {
 mod tests {
     use super::*;
 
-    fn backend(id: u64, port: u16) -> BackendConfig {
-        BackendConfig::new(format!("127.0.0.1:{port}"), id, None)
+    fn candidate(id: u64, port: u16) -> BackendCandidate {
+        BackendCandidate {
+            backend: BackendConfig::new(format!("127.0.0.1:{port}"), id, None),
+            active_connections: 0,
+        }
     }
 
     struct FirstBackendStrategy;
@@ -28,18 +34,18 @@ mod tests {
     impl BalancingStrategy for FirstBackendStrategy {
         fn select_backend(
             &mut self,
-            candidates: &[BackendConfig],
+            candidates: &[BackendCandidate],
         ) -> Result<BackendConfig, BalanceError> {
             candidates
                 .first()
-                .cloned()
+                .map(|candidate| candidate.backend.clone())
                 .ok_or(BalanceError::NoBackendsAvailable)
         }
     }
 
     #[test]
     fn strategy_selects_backend_from_candidates() {
-        let candidates = vec![backend(1, 8081), backend(2, 8082)];
+        let candidates = vec![candidate(1, 8081), candidate(2, 8082)];
         let mut strategy = FirstBackendStrategy;
 
         let selected = strategy.select_backend(&candidates).unwrap();
@@ -59,7 +65,7 @@ mod tests {
 
     #[test]
     fn strategy_can_be_used_as_trait_object() {
-        let candidates = vec![backend(1, 8081)];
+        let candidates = vec![candidate(1, 8081)];
         let mut strategy: Box<dyn BalancingStrategy> = Box::new(FirstBackendStrategy);
 
         let selected = strategy.select_backend(&candidates).unwrap();
