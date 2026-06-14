@@ -1,5 +1,5 @@
-use crate::balancing::{BalancingStrategy, LeastConnections, RoundRobin};
-use crate::config::{LoadBalancerConfig, StrategyKind};
+use crate::balancing::{BalanceError, BalancingStrategy, LeastConnections, RoundRobin};
+use crate::config::{BackendConfig, LoadBalancerConfig, StrategyKind};
 use crate::pool::BackendPool;
 use crate::proxy::proxy_connection;
 use std::future::Future;
@@ -67,17 +67,11 @@ impl LoadBalancer {
                 accept_result = listener.accept() => {
                     match accept_result {
                         Ok((socket, client_addr)) => {
-                            let candidates = pool.healthy_candidates();
 
-                            if candidates.is_empty() {
-                                println!("No healthy backends found");
-                                continue;
-                            }
-
-                            let backend = match strategy.select_backend(&candidates) {
+                            let backend = match Self::select_backend_for_client(&pool, strategy.as_mut()) {
                                 Ok(backend) => backend,
-                                Err(_) => {
-                                    eprintln!("No healthy backends");
+                                Err(BalanceError::NoBackendsAvailable) => {
+                                    eprintln!("No healthy backends; rejecting client {}", client_addr);
                                     continue;
                                 }
                             };
@@ -141,6 +135,14 @@ impl LoadBalancer {
     ) -> Result<(), Box<dyn std::error::Error>> {
         Self::serve_with_strategy(listener, pool, Box::new(RoundRobin::new())).await
     }
+
+    fn select_backend_for_client(
+        pool: &BackendPool,
+        strategy: &mut dyn BalancingStrategy,
+    ) -> Result<BackendConfig, BalanceError> {
+        let candidates = pool.healthy_candidates();
+        strategy.select_backend(&candidates)
+    }
 }
 
 #[cfg(test)]
@@ -150,7 +152,7 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, TcpStream};
     use tokio::sync::oneshot;
-    use tokio::time::{Duration, timeout};
+    use tokio::time::{timeout, Duration};
 
     fn backend(id: u64, port: u16) -> BackendConfig {
         BackendConfig::new(format!("127.0.0.1:{port}"), id, None)
