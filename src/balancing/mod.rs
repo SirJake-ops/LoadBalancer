@@ -11,7 +11,7 @@ pub enum BalanceError {
     NoBackendsAvailable,
 }
 
-pub trait BalancingStrategy {
+pub trait BalancingStrategy: Send {
     fn select_backend(
         &mut self,
         candidates: &[BackendCandidate],

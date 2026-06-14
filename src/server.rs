@@ -1,5 +1,5 @@
-use crate::balancing::{BalancingStrategy, RoundRobin};
-use crate::config::LoadBalancerConfig;
+use crate::balancing::{BalancingStrategy, LeastConnections, RoundRobin};
+use crate::config::{LoadBalancerConfig, StrategyKind};
 use crate::pool::BackendPool;
 use crate::proxy::proxy_connection;
 use std::future::Future;
@@ -24,10 +24,18 @@ impl LoadBalancer {
             return Err("config must include at least one backend".into());
         }
 
+        let strategy = Self::strategy_for(config.strategy);
         let backend_pool = BackendPool::new(config.backend_list);
 
         println!("Listening on {}", listener.local_addr()?);
-        Self::serve(listener, backend_pool).await
+        Self::serve_with_strategy(listener, backend_pool, strategy).await
+    }
+
+    fn strategy_for(strategy: StrategyKind) -> Box<dyn BalancingStrategy> {
+        match strategy {
+            StrategyKind::RoundRobin => Box::new(RoundRobin::new()),
+            StrategyKind::LeastConnections => Box::new(LeastConnections::new()),
+        }
     }
 
     pub(crate) async fn serve_until_shutdown(
@@ -35,10 +43,24 @@ impl LoadBalancer {
         pool: BackendPool,
         shutdown: impl Future<Output = std::io::Result<()>>,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        Self::serve_with_strategy_until_shutdown(
+            listener,
+            pool,
+            Box::new(RoundRobin::new()),
+            shutdown,
+        )
+        .await
+    }
+
+    pub(crate) async fn serve_with_strategy_until_shutdown(
+        listener: TcpListener,
+        pool: BackendPool,
+        mut strategy: Box<dyn BalancingStrategy>,
+        shutdown: impl Future<Output = std::io::Result<()>>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         tokio::pin!(shutdown);
 
         let mut tasks = JoinSet::new();
-        let mut strategy = RoundRobin::new();
 
         loop {
             tokio::select! {
@@ -104,18 +126,27 @@ impl LoadBalancer {
         Ok(())
     }
 
+    pub(crate) async fn serve_with_strategy(
+        listener: TcpListener,
+        pool: BackendPool,
+        strategy: Box<dyn BalancingStrategy>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        Self::serve_with_strategy_until_shutdown(listener, pool, strategy, tokio::signal::ctrl_c())
+            .await
+    }
+
     pub(crate) async fn serve(
         listener: TcpListener,
         pool: BackendPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        Self::serve_until_shutdown(listener, pool, tokio::signal::ctrl_c()).await
+        Self::serve_with_strategy(listener, pool, Box::new(RoundRobin::new())).await
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::BackendConfig;
+    use crate::config::{BackendCandidate, BackendConfig};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, TcpStream};
     use tokio::sync::oneshot;
@@ -123,6 +154,35 @@ mod tests {
 
     fn backend(id: u64, port: u16) -> BackendConfig {
         BackendConfig::new(format!("127.0.0.1:{port}"), id, None)
+    }
+
+    #[test]
+    fn configured_strategy_controls_selection_logic() {
+        let candidates = vec![
+            BackendCandidate {
+                backend: backend(1, 8081),
+                active_connections: 10,
+            },
+            BackendCandidate {
+                backend: backend(2, 8082),
+                active_connections: 1,
+            },
+        ];
+
+        let mut round_robin = LoadBalancer::strategy_for(StrategyKind::RoundRobin);
+        assert_eq!(
+            round_robin.select_backend(&candidates).unwrap().backend_id,
+            "1"
+        );
+
+        let mut least_connections = LoadBalancer::strategy_for(StrategyKind::LeastConnections);
+        assert_eq!(
+            least_connections
+                .select_backend(&candidates)
+                .unwrap()
+                .backend_id,
+            "2"
+        );
     }
 
     #[tokio::test]
