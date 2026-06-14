@@ -1,6 +1,6 @@
 # Rust Load Balancer
 
-TCP load balancer written in Rust with Tokio. The project currently supports a transparent single-backend proxy path, TOML configuration, per-connection Tokio tasks, and graceful shutdown handling.
+TCP load balancer written in Rust with Tokio. The project currently supports a transparent TCP proxy path, TOML configuration, per-connection Tokio tasks, graceful shutdown handling, backend pool state, and round-robin routing across healthy backends.
 
 The longer-term goal is to grow this into a configurable load balancer with backend pool state, health checks, and pluggable balancing strategies such as round-robin and least-connections.
 
@@ -8,12 +8,12 @@ The longer-term goal is to grow this into a configurable load balancer with back
 
 - Loads runtime configuration from TOML.
 - Binds a TCP listener to the configured address.
-- Proxies client TCP connections to the first configured backend.
+- Proxies client TCP connections to healthy configured backends.
 - Copies bytes in both directions with `tokio::io::copy_bidirectional`.
 - Handles each accepted connection in its own Tokio task.
 - Tracks spawned connection tasks during shutdown with `JoinSet`.
 - Stops accepting new connections on `Ctrl-C`.
-- Includes unit tests for config parsing, proxy behavior, concurrent connections, and shutdown.
+- Includes unit tests for config parsing, proxy behavior, concurrent connections, shutdown, backend pool state, and round-robin selection.
 
 ## Requirements
 
@@ -43,7 +43,7 @@ interval_seconds = 10
 timeout_seconds = 5
 ```
 
-At the moment, the server proxies to the first backend in `backend_list`. Multi-backend selection is tracked in the backlog.
+The server selects a healthy backend for each accepted connection using round-robin routing over `backend_list` candidates.
 
 ## Running
 
@@ -110,18 +110,6 @@ docs/
 ```
 
 ## Key Upcoming Features
-
-**Backend Pool State**
-
-Track each configured backend at runtime, including its health status and active connection count. This will give routing, health checks, and observability a shared view of backend availability.
-
-**Balancing Strategy Trait**
-
-Introduce a small strategy interface for selecting a backend from the available candidates. This keeps algorithms such as round-robin and least-connections testable and swappable.
-
-**Round-Robin Routing**
-
-Distribute new connections across healthy backends in order instead of always proxying to the first configured backend.
 
 **Backend Health Checks**
 

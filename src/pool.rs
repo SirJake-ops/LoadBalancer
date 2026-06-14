@@ -1,17 +1,5 @@
-use crate::config::BackendConfig;
+use crate::config::{BackendCandidate, BackendConfig};
 use std::sync::{Arc, Mutex};
-
-#[derive(Debug)]
-pub struct PoolState {
-    pub active_connections: usize,
-    pub max_connections: usize,
-    pub total_connections: u64,
-}
-
-#[derive(Debug, Clone)]
-pub struct ProxyPool {
-    inner: Arc<Mutex<PoolState>>,
-}
 
 #[derive(Debug)]
 pub struct BackendState {
@@ -23,44 +11,6 @@ pub struct BackendState {
 #[derive(Debug, Clone)]
 pub struct BackendPool {
     inner: Arc<Mutex<Vec<BackendState>>>,
-}
-
-impl ProxyPool {
-    pub fn new() -> Self {
-        Self::with_max_connections(1024)
-    }
-
-    pub fn with_max_connections(max_connections: usize) -> Self {
-        Self {
-            inner: Arc::new(Mutex::new(PoolState {
-                active_connections: 0,
-                max_connections,
-                total_connections: 0,
-            })),
-        }
-    }
-
-    pub fn get_snapshot(&self) -> (usize, usize, u64) {
-        let state = self.inner.lock().unwrap();
-        (
-            state.active_connections,
-            state.max_connections,
-            state.total_connections,
-        )
-    }
-
-    pub(crate) fn try_acquire(&self) -> Option<PoolGuard> {
-        let mut state = self.inner.lock().unwrap();
-        if state.active_connections < state.max_connections {
-            state.active_connections += 1;
-            state.total_connections += 1;
-            Some(PoolGuard {
-                inner: self.inner.clone(),
-            })
-        } else {
-            None
-        }
-    }
 }
 
 impl BackendPool {
@@ -79,6 +29,7 @@ impl BackendPool {
         }
     }
 
+    #[cfg(test)]
     pub fn healthy_backends(&self) -> Vec<BackendConfig> {
         let state = self.inner.lock().unwrap();
         state
@@ -88,6 +39,19 @@ impl BackendPool {
             .collect()
     }
 
+    pub fn healthy_candidates(&self) -> Vec<BackendCandidate> {
+        let state = self.inner.lock().unwrap();
+        state
+            .iter()
+            .filter(|backend| backend.healthy)
+            .map(|backend| BackendCandidate {
+                backend: backend.config.clone(),
+                active_connections: backend.active_connections,
+            })
+            .collect()
+    }
+
+    #[cfg(test)]
     pub fn mark_healthy(&self, backend_id: String) {
         let mut state = self.inner.lock().unwrap();
         for backend in state.iter_mut() {
@@ -97,6 +61,7 @@ impl BackendPool {
         }
     }
 
+    #[cfg(test)]
     pub fn mark_unhealthy(&self, backend_id: String) {
         let mut state = self.inner.lock().unwrap();
         for backend in state.iter_mut() {
@@ -106,6 +71,7 @@ impl BackendPool {
         }
     }
 
+    #[cfg(test)]
     pub fn increment_connections(&self, backend_id: String) {
         let mut state = self.inner.lock().unwrap();
         for backend in state.iter_mut() {
@@ -115,6 +81,7 @@ impl BackendPool {
         }
     }
 
+    #[cfg(test)]
     pub fn decrement_connections(&self, backend_id: String) {
         let mut state = self.inner.lock().unwrap();
         for backend in state.iter_mut() {
@@ -124,6 +91,7 @@ impl BackendPool {
         }
     }
 
+    #[cfg(test)]
     pub fn active_connections(&self, backend_id: &str) -> Option<usize> {
         let state = self.inner.lock().unwrap();
         state
@@ -148,19 +116,6 @@ impl BackendPool {
             inner: self.inner.clone(),
             backend_id: backend.config.backend_id.clone(),
         })
-    }
-}
-
-pub struct PoolGuard {
-    inner: Arc<Mutex<PoolState>>,
-}
-
-impl Drop for PoolGuard {
-    fn drop(&mut self) {
-        let mut state = self.inner.lock().unwrap();
-        if state.active_connections > 0 {
-            state.active_connections -= 1;
-        }
     }
 }
 
@@ -259,6 +214,23 @@ mod tests {
         pool.decrement_connections("1".to_string());
 
         assert_eq!(pool.active_connections("1"), Some(0));
+    }
+
+    #[test]
+    fn healthy_candidates_include_active_connection_counts() {
+        let pool = BackendPool::new(vec![backend(1, 8081), backend(2, 8082)]);
+
+        let _first_guard = pool.try_acquire("1").unwrap();
+        let _second_guard = pool.try_acquire("1").unwrap();
+        let _third_guard = pool.try_acquire("2").unwrap();
+
+        let candidates = pool.healthy_candidates();
+
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0].backend.backend_id, "1");
+        assert_eq!(candidates[0].active_connections, 2);
+        assert_eq!(candidates[1].backend.backend_id, "2");
+        assert_eq!(candidates[1].active_connections, 1);
     }
 
     #[test]
