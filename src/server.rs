@@ -38,6 +38,7 @@ impl LoadBalancer {
         }
     }
 
+    #[cfg(test)]
     pub(crate) async fn serve_until_shutdown(
         listener: TcpListener,
         pool: BackendPool,
@@ -129,6 +130,7 @@ impl LoadBalancer {
             .await
     }
 
+    #[cfg(test)]
     pub(crate) async fn serve(
         listener: TcpListener,
         pool: BackendPool,
@@ -152,7 +154,7 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, TcpStream};
     use tokio::sync::oneshot;
-    use tokio::time::{timeout, Duration};
+    use tokio::time::{Duration, timeout};
 
     fn backend(id: u64, port: u16) -> BackendConfig {
         BackendConfig::new(format!("127.0.0.1:{port}"), id, None)
@@ -346,6 +348,64 @@ mod tests {
 
         server_task.abort();
         test_result.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_server_rejects_client_when_no_backend_is_healthy_and_keeps_serving() {
+        let backend_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let backend_addr = backend_listener.local_addr().unwrap();
+        let backend = BackendConfig {
+            backend_address: backend_addr,
+            backend_id: "backend-1".to_string(),
+            weight: None,
+        };
+        let pool = BackendPool::new(vec![backend]);
+        pool.mark_unhealthy("backend-1".to_string());
+
+        let server_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let server_addr = server_listener.local_addr().unwrap();
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let server_pool = pool.clone();
+        let server = tokio::spawn(async move {
+            let _ = LoadBalancer::serve_until_shutdown(server_listener, server_pool, async {
+                shutdown_rx.await.map_err(std::io::Error::other)
+            })
+            .await;
+        });
+
+        timeout(Duration::from_secs(2), async {
+            let mut rejected_client = TcpStream::connect(server_addr).await.unwrap();
+            let mut response = [0; 1];
+            let bytes_read = rejected_client.read(&mut response).await.unwrap();
+            assert_eq!(bytes_read, 0);
+        })
+        .await
+        .unwrap();
+
+        pool.mark_healthy("backend-1".to_string());
+        tokio::spawn(async move {
+            let (mut backend_socket, _) = backend_listener.accept().await.unwrap();
+            let mut buffer = [0; 4];
+            backend_socket.read_exact(&mut buffer).await.unwrap();
+            backend_socket.write_all(&buffer).await.unwrap();
+        });
+
+        timeout(Duration::from_secs(2), async {
+            let mut client = TcpStream::connect(server_addr).await.unwrap();
+            client.write_all(b"ping").await.unwrap();
+
+            let mut response = [0; 4];
+            client.read_exact(&mut response).await.unwrap();
+            assert_eq!(&response, b"ping");
+        })
+        .await
+        .unwrap();
+
+        shutdown_tx.send(()).unwrap();
+        timeout(Duration::from_secs(2), server)
+            .await
+            .unwrap()
+            .unwrap();
     }
 
     #[tokio::test]
