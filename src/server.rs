@@ -6,6 +6,7 @@ use std::future::Future;
 use std::path::Path;
 use tokio::net::TcpListener;
 use tokio::task::JoinSet;
+use crate::health;
 
 pub struct LoadBalancer;
 
@@ -26,6 +27,8 @@ impl LoadBalancer {
 
         let strategy = Self::strategy_for(config.strategy);
         let backend_pool = BackendPool::new(config.backend_list);
+
+        let _health_checker = health::spawn_health_checker(backend_pool.clone(), config.health_check_interval);
 
         println!("Listening on {}", listener.local_addr()?);
         Self::serve_with_strategy(listener, backend_pool, strategy).await
