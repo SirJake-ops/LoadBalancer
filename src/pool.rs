@@ -51,7 +51,6 @@ impl BackendPool {
             .collect()
     }
 
-    #[cfg(test)]
     pub fn mark_healthy(&self, backend_id: String) {
         let mut state = self.inner.lock().unwrap();
         for backend in state.iter_mut() {
@@ -61,7 +60,6 @@ impl BackendPool {
         }
     }
 
-    #[cfg(test)]
     pub fn mark_unhealthy(&self, backend_id: String) {
         let mut state = self.inner.lock().unwrap();
         for backend in state.iter_mut() {
@@ -69,6 +67,11 @@ impl BackendPool {
                 backend.healthy = false;
             }
         }
+    }
+
+    pub fn backends(&self) -> Vec<BackendConfig> {
+        let state = self.inner.lock().unwrap();
+        state.iter().map(|backend| backend.config.clone()).collect()
     }
 
     #[cfg(test)]
