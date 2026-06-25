@@ -15,8 +15,16 @@ impl LoadBalancerConfig {
         Self {
             listener_address: "127.0.0.1:8080".parse().unwrap(),
             backend_list: vec![
-                BackendConfig::new("127.0.0.1:8081".to_string(), 1, Some(1)),
-                BackendConfig::new("127.0.0.1:8082".to_string(), 2, Some(2)),
+                BackendConfig::new(
+                    "127.0.0.1:8081".to_string(),
+                    "backend-id-1".to_string(),
+                    Some(1),
+                ),
+                BackendConfig::new(
+                    "127.0.0.1:8082".to_string(),
+                    "backend-id-2".to_string(),
+                    Some(2),
+                ),
             ],
             strategy: StrategyKind::RoundRobin,
             health_check_interval: HealthCheckConfig {
@@ -45,11 +53,11 @@ pub struct BackendConfig {
 }
 
 impl BackendConfig {
-    pub fn new(backend_address: String, backend_id: u64, weight: Option<u64>) -> Self {
+    pub fn new(backend_address: String, backend_id: String, weight: Option<u32>) -> Self {
         Self {
             backend_address: backend_address.parse().unwrap(),
-            backend_id: backend_id.to_string(),
-            weight: weight.map(|w| w as u32),
+            backend_id,
+            weight,
         }
     }
 }
@@ -82,12 +90,16 @@ fn test_config() {
     assert_eq!(config.health_check_interval.interval_seconds, 10);
     assert_eq!(config.health_check_interval.timeout_seconds, 5);
 
-    let backend_config = BackendConfig::new("127.0.0.1:8081".to_string(), 1, None);
+    let backend_config = BackendConfig::new(
+        "127.0.0.1:8081".to_string(),
+        "backend-id-1".to_string(),
+        None,
+    );
     assert_eq!(
         backend_config.backend_address,
         "127.0.0.1:8081".parse().unwrap()
     );
-    assert_eq!(backend_config.backend_id, "1");
+    assert_eq!(backend_config.backend_id, "backend-id-1");
     assert_eq!(backend_config.weight, None);
 }
 

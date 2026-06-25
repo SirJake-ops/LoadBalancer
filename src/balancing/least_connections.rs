@@ -31,9 +31,9 @@ impl BalancingStrategy for LeastConnections {
 mod tests {
     use super::*;
 
-    fn candidate(id: u64, port: u16, active_connections: usize) -> BackendCandidate {
+    fn candidate(id: &str, port: u16, active_connections: usize) -> BackendCandidate {
         BackendCandidate {
-            backend: BackendConfig::new(format!("127.0.0.1:{port}"), id, None),
+            backend: BackendConfig::new(format!("127.0.0.1:{port}"), id.to_string(), None),
             active_connections,
         }
     }
@@ -42,9 +42,9 @@ mod tests {
     fn selects_backend_with_fewest_active_connections() {
         let mut strategy = LeastConnections::new();
         let candidates = vec![
-            candidate(1, 8081, 4),
-            candidate(2, 8082, 1),
-            candidate(3, 8083, 7),
+            candidate("1", 8081, 4),
+            candidate("2", 8082, 1),
+            candidate("3", 8083, 7),
         ];
 
         let selected = strategy.select_backend(&candidates).unwrap();
@@ -56,9 +56,9 @@ mod tests {
     fn tie_selects_first_candidate_with_lowest_connection_count() {
         let mut strategy = LeastConnections::new();
         let candidates = vec![
-            candidate(1, 8081, 2),
-            candidate(2, 8082, 2),
-            candidate(3, 8083, 5),
+            candidate("1", 8081, 2),
+            candidate("2", 8082, 2),
+            candidate("3", 8083, 5),
         ];
 
         let selected = strategy.select_backend(&candidates).unwrap();

@@ -1,12 +1,12 @@
 use crate::balancing::{BalanceError, BalancingStrategy, LeastConnections, RoundRobin};
 use crate::config::{BackendConfig, LoadBalancerConfig, StrategyKind};
+use crate::health;
 use crate::pool::BackendPool;
 use crate::proxy::proxy_connection;
 use std::future::Future;
 use std::path::Path;
 use tokio::net::TcpListener;
 use tokio::task::JoinSet;
-use crate::health;
 
 pub struct LoadBalancer;
 
@@ -28,7 +28,8 @@ impl LoadBalancer {
         let strategy = Self::strategy_for(config.strategy);
         let backend_pool = BackendPool::new(config.backend_list);
 
-        let _health_checker = health::spawn_health_checker(backend_pool.clone(), config.health_check_interval);
+        let _health_checker =
+            health::spawn_health_checker(backend_pool.clone(), config.health_check_interval);
 
         println!("Listening on {}", listener.local_addr()?);
         Self::serve_with_strategy(listener, backend_pool, strategy).await
@@ -159,19 +160,19 @@ mod tests {
     use tokio::sync::oneshot;
     use tokio::time::{Duration, timeout};
 
-    fn backend(id: u64, port: u16) -> BackendConfig {
-        BackendConfig::new(format!("127.0.0.1:{port}"), id, None)
+    fn backend(id: &str, port: u16) -> BackendConfig {
+        BackendConfig::new(format!("127.0.0.1:{port}"), id.to_string(), None)
     }
 
     #[test]
     fn configured_strategy_controls_selection_logic() {
         let candidates = vec![
             BackendCandidate {
-                backend: backend(1, 8081),
+                backend: backend("1", 8081),
                 active_connections: 10,
             },
             BackendCandidate {
-                backend: backend(2, 8082),
+                backend: backend("2", 8082),
                 active_connections: 1,
             },
         ];
