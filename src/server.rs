@@ -11,28 +11,31 @@ use tokio::task::JoinSet;
 pub struct LoadBalancer;
 
 impl LoadBalancer {
-    pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>> {
         Self::run_with_config("config.toml").await
     }
 
     pub async fn run_with_config(
         config_path: impl AsRef<Path>,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn core::error::Error + Send + Sync + 'static>> {
         let config = LoadBalancerConfig::from_file(config_path)?;
-        let listener = TcpListener::bind(config.listener_address).await?;
+        let mut service_tasks = JoinSet::new();
 
-        if config.backend_list.is_empty() {
-            return Err("config must include at least one backend".into());
+        for service in config.services {
+            service_tasks.spawn( async move {
+                let listener = TcpListener::bind(service.listener_address).await?;
+                let strategy = Self::strategy_for(service.strategy);
+                let backend_pool = BackendPool::new(service.backend_list);
+                let _health_checker = health::spawn_health_checker(backend_pool.clone(), service.health_check_interval);
+                println!("Listening on {}", listener.local_addr()?);
+                Self::serve_with_strategy(listener, backend_pool, strategy).await
+            });
         }
 
-        let strategy = Self::strategy_for(config.strategy);
-        let backend_pool = BackendPool::new(config.backend_list);
-
-        let _health_checker =
-            health::spawn_health_checker(backend_pool.clone(), config.health_check_interval);
-
-        println!("Listening on {}", listener.local_addr()?);
-        Self::serve_with_strategy(listener, backend_pool, strategy).await
+        while let Some(result) = service_tasks.join_next().await {
+            result.unwrap().expect("Error running service");
+        }
+        Ok(())
     }
 
     fn strategy_for(strategy: StrategyKind) -> Box<dyn BalancingStrategy> {
@@ -47,7 +50,7 @@ impl LoadBalancer {
         listener: TcpListener,
         pool: BackendPool,
         shutdown: impl Future<Output = std::io::Result<()>>,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>> {
         Self::serve_with_strategy_until_shutdown(
             listener,
             pool,
@@ -62,7 +65,7 @@ impl LoadBalancer {
         pool: BackendPool,
         mut strategy: Box<dyn BalancingStrategy>,
         shutdown: impl Future<Output = std::io::Result<()>>,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>> {
         tokio::pin!(shutdown);
 
         let mut tasks = JoinSet::new();
@@ -129,7 +132,7 @@ impl LoadBalancer {
         listener: TcpListener,
         pool: BackendPool,
         strategy: Box<dyn BalancingStrategy>,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>> {
         Self::serve_with_strategy_until_shutdown(listener, pool, strategy, tokio::signal::ctrl_c())
             .await
     }
@@ -138,7 +141,7 @@ impl LoadBalancer {
     pub(crate) async fn serve(
         listener: TcpListener,
         pool: BackendPool,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>> {
         Self::serve_with_strategy(listener, pool, Box::new(RoundRobin::new())).await
     }
 
