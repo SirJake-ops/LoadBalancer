@@ -33,7 +33,7 @@ impl LoadBalancer {
         }
 
         while let Some(result) = service_tasks.join_next().await {
-            result.unwrap().expect("Error running service");
+            result??;
         }
         Ok(())
     }
@@ -158,13 +158,46 @@ impl LoadBalancer {
 mod tests {
     use super::*;
     use crate::config::{BackendCandidate, BackendConfig};
+    use std::fs;
+    use std::net::SocketAddr;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, TcpStream};
     use tokio::sync::oneshot;
-    use tokio::time::{Duration, timeout};
+    use tokio::time::{Duration, sleep, timeout};
 
     fn backend(id: &str, port: u16) -> BackendConfig {
         BackendConfig::new(format!("127.0.0.1:{port}"), id.to_string(), None)
+    }
+
+    async fn unused_local_addr() -> SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        listener.local_addr().unwrap()
+    }
+
+    async fn connect_with_retry(addr: SocketAddr) -> TcpStream {
+        for _ in 0..20 {
+            if let Ok(stream) = TcpStream::connect(addr).await {
+                return stream;
+            }
+
+            sleep(Duration::from_millis(25)).await;
+        }
+
+        panic!("failed to connect to {addr}");
+    }
+
+    async fn respond_forever(listener: TcpListener, response: &'static [u8]) {
+        loop {
+            let (mut backend_socket, _) = listener.accept().await.unwrap();
+
+            tokio::spawn(async move {
+                let mut buffer = [0; 1024];
+                let bytes_read = backend_socket.read(&mut buffer).await.unwrap();
+                if bytes_read > 0 {
+                    backend_socket.write_all(response).await.unwrap();
+                }
+            });
+        }
     }
 
     #[test]
@@ -294,6 +327,86 @@ mod tests {
         .await;
 
         server_task.abort();
+        test_result.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_run_with_config_starts_independent_service_listeners() {
+        let java_backend_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let java_backend_addr = java_backend_listener.local_addr().unwrap();
+        let cpp_backend_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let cpp_backend_addr = cpp_backend_listener.local_addr().unwrap();
+        let java_listener_addr = unused_local_addr().await;
+        let cpp_listener_addr = unused_local_addr().await;
+
+        let java_backend_task = tokio::spawn(respond_forever(java_backend_listener, b"java"));
+        let cpp_backend_task = tokio::spawn(respond_forever(cpp_backend_listener, b"cpp!"));
+
+        let config_path = std::env::temp_dir().join(format!(
+            "load_balancer_multi_service_test_{}.toml",
+            std::process::id()
+        ));
+
+        fs::write(
+            &config_path,
+            format!(
+                r#"
+[[services]]
+name = "java-api"
+listener_address = "{java_listener_addr}"
+strategy = "round_robin"
+
+[[services.backend_list]]
+backend_address = "{java_backend_addr}"
+backend_id = "java-api-1"
+weight = 1
+
+[services.health_check_interval]
+interval_seconds = 60
+timeout_seconds = 1
+
+[[services]]
+name = "cpp-engine"
+listener_address = "{cpp_listener_addr}"
+strategy = "round_robin"
+
+[[services.backend_list]]
+backend_address = "{cpp_backend_addr}"
+backend_id = "cpp-engine-1"
+weight = 1
+
+[services.health_check_interval]
+interval_seconds = 60
+timeout_seconds = 1
+"#
+            ),
+        )
+        .unwrap();
+
+        let config_path_for_server = config_path.clone();
+        let server_task = tokio::spawn(async move {
+            let _ = LoadBalancer::run_with_config(config_path_for_server).await;
+        });
+
+        let test_result = timeout(Duration::from_secs(2), async {
+            let mut java_client = connect_with_retry(java_listener_addr).await;
+            java_client.write_all(b"ping").await.unwrap();
+            let mut java_response = [0; 4];
+            java_client.read_exact(&mut java_response).await.unwrap();
+            assert_eq!(&java_response, b"java");
+
+            let mut cpp_client = connect_with_retry(cpp_listener_addr).await;
+            cpp_client.write_all(b"ping").await.unwrap();
+            let mut cpp_response = [0; 4];
+            cpp_client.read_exact(&mut cpp_response).await.unwrap();
+            assert_eq!(&cpp_response, b"cpp!");
+        })
+        .await;
+
+        server_task.abort();
+        java_backend_task.abort();
+        cpp_backend_task.abort();
+        fs::remove_file(config_path).unwrap();
         test_result.unwrap();
     }
 
