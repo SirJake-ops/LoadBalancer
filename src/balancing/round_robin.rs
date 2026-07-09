@@ -31,9 +31,9 @@ impl BalancingStrategy for RoundRobin {
 mod tests {
     use super::*;
 
-    fn candidate(id: u64, port: u16) -> BackendCandidate {
+    fn candidate(id: &str, port: u16) -> BackendCandidate {
         BackendCandidate {
-            backend: BackendConfig::new(format!("127.0.0.1:{port}"), id, None),
+            backend: BackendConfig::new(format!("127.0.0.1:{port}"), id.to_string(), None),
             active_connections: 0,
         }
     }
@@ -41,7 +41,7 @@ mod tests {
     #[test]
     pub fn selects_backends_in_round_robin_order() {
         let mut round_robin = RoundRobin::new();
-        let backends = vec![candidate(1, 8081), candidate(2, 8082)];
+        let backends = vec![candidate("1", 8081), candidate("2", 8082)];
 
         assert_eq!(
             round_robin.select_backend(&backends).unwrap().backend_id,
@@ -62,7 +62,7 @@ mod tests {
     #[test]
     pub fn selects_only_from_provided_healthy_candidates() {
         let mut round_robin = RoundRobin::new();
-        let backends = vec![candidate(1, 8081), candidate(3, 8083)];
+        let backends = vec![candidate("1", 8081), candidate("3", 8083)];
         assert_eq!(
             round_robin.select_backend(&backends).unwrap().backend_id,
             "1"

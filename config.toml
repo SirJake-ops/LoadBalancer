@@ -1,16 +1,27 @@
-listener_address = "127.0.0.1:8080"
+[[services]]
+name = "java-api"
+listener_address = "127.0.0.1:9001"
 strategy = "round_robin"
 
-[[backend_list]]
+[[services.backend_list]]
 backend_address = "127.0.0.1:8081"
-backend_id = "1"
+backend_id = "java-api-1"
 weight = 1
 
-[[backend_list]]
-backend_address = "127.0.0.1:8082"
-backend_id = "2"
-weight = 2
+[services.health_check_interval]
+interval_seconds = 10
+timeout_seconds = 5
 
-[health_check_interval]
+[[services]]
+name = "cpp-engine"
+listener_address = "127.0.0.1:9002"
+strategy = "round_robin"
+
+[[services.backend_list]]
+backend_address = "127.0.0.1:8080"
+backend_id = "cpp-engine-1"
+weight = 1
+
+[services.health_check_interval]
 interval_seconds = 10
 timeout_seconds = 5

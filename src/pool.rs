@@ -51,7 +51,6 @@ impl BackendPool {
             .collect()
     }
 
-    #[cfg(test)]
     pub fn mark_healthy(&self, backend_id: String) {
         let mut state = self.inner.lock().unwrap();
         for backend in state.iter_mut() {
@@ -61,7 +60,6 @@ impl BackendPool {
         }
     }
 
-    #[cfg(test)]
     pub fn mark_unhealthy(&self, backend_id: String) {
         let mut state = self.inner.lock().unwrap();
         for backend in state.iter_mut() {
@@ -69,6 +67,11 @@ impl BackendPool {
                 backend.healthy = false;
             }
         }
+    }
+
+    pub fn backends(&self) -> Vec<BackendConfig> {
+        let state = self.inner.lock().unwrap();
+        state.iter().map(|backend| backend.config.clone()).collect()
     }
 
     #[cfg(test)]
@@ -145,8 +148,8 @@ impl Drop for BackendGuard {
 mod tests {
     use super::*;
 
-    fn backend(id: u64, port: u16) -> BackendConfig {
-        BackendConfig::new(format!("127.0.0.1:{port}"), id, None)
+    fn backend(id: &str, port: u16) -> BackendConfig {
+        BackendConfig::new(format!("127.0.0.1:{port}"), id.to_string(), None)
     }
 
     #[test]
@@ -158,7 +161,7 @@ mod tests {
 
     #[test]
     fn new_pool_marks_configured_backends_as_healthy() {
-        let pool = BackendPool::new(vec![backend(1, 8081), backend(2, 8082)]);
+        let pool = BackendPool::new(vec![backend("1", 8081), backend("2", 8082)]);
 
         let healthy_backends = pool.healthy_backends();
 
@@ -169,7 +172,7 @@ mod tests {
 
     #[test]
     fn unhealthy_backend_is_excluded_from_healthy_backends() {
-        let pool = BackendPool::new(vec![backend(1, 8081), backend(2, 8082)]);
+        let pool = BackendPool::new(vec![backend("1", 8081), backend("2", 8082)]);
 
         pool.mark_unhealthy("1".to_string());
 
@@ -181,7 +184,7 @@ mod tests {
 
     #[test]
     fn backend_can_be_marked_healthy_after_being_unhealthy() {
-        let pool = BackendPool::new(vec![backend(1, 8081)]);
+        let pool = BackendPool::new(vec![backend("1", 8081)]);
 
         pool.mark_unhealthy("1".to_string());
         assert!(pool.healthy_backends().is_empty());
@@ -195,7 +198,7 @@ mod tests {
 
     #[test]
     fn active_connection_count_can_increment_and_decrement() {
-        let pool = BackendPool::new(vec![backend(1, 8081)]);
+        let pool = BackendPool::new(vec![backend("1", 8081)]);
 
         assert_eq!(pool.active_connections("1"), Some(0));
 
@@ -209,7 +212,7 @@ mod tests {
 
     #[test]
     fn decrementing_zero_active_connections_does_not_underflow() {
-        let pool = BackendPool::new(vec![backend(1, 8081)]);
+        let pool = BackendPool::new(vec![backend("1", 8081)]);
 
         pool.decrement_connections("1".to_string());
 
@@ -218,7 +221,7 @@ mod tests {
 
     #[test]
     fn healthy_candidates_include_active_connection_counts() {
-        let pool = BackendPool::new(vec![backend(1, 8081), backend(2, 8082)]);
+        let pool = BackendPool::new(vec![backend("1", 8081), backend("2", 8082)]);
 
         let _first_guard = pool.try_acquire("1").unwrap();
         let _second_guard = pool.try_acquire("1").unwrap();
@@ -235,7 +238,7 @@ mod tests {
 
     #[test]
     fn try_acquire_increments_active_connections_until_guard_is_dropped() {
-        let pool = BackendPool::new(vec![backend(1, 8081)]);
+        let pool = BackendPool::new(vec![backend("1", 8081)]);
 
         assert_eq!(pool.active_connections("1"), Some(0));
 
@@ -249,7 +252,7 @@ mod tests {
 
     #[test]
     fn try_acquire_returns_none_for_unhealthy_backend() {
-        let pool = BackendPool::new(vec![backend(1, 8081)]);
+        let pool = BackendPool::new(vec![backend("1", 8081)]);
 
         pool.mark_unhealthy("1".to_string());
         let guard = pool.try_acquire("1");
@@ -259,7 +262,7 @@ mod tests {
 
     #[test]
     fn try_acquire_returns_none_for_unknown_backend() {
-        let pool = BackendPool::new(vec![backend(1, 8081)]);
+        let pool = BackendPool::new(vec![backend("1", 8081)]);
 
         assert!(pool.try_acquire("missing").is_none());
     }

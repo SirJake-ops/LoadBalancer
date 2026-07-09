@@ -22,9 +22,9 @@ pub trait BalancingStrategy: Send {
 mod tests {
     use super::*;
 
-    fn candidate(id: u64, port: u16) -> BackendCandidate {
+    fn candidate(id: &str, port: u16) -> BackendCandidate {
         BackendCandidate {
-            backend: BackendConfig::new(format!("127.0.0.1:{port}"), id, None),
+            backend: BackendConfig::new(format!("127.0.0.1:{port}"), id.to_string(), None),
             active_connections: 0,
         }
     }
@@ -45,7 +45,7 @@ mod tests {
 
     #[test]
     fn strategy_selects_backend_from_candidates() {
-        let candidates = vec![candidate(1, 8081), candidate(2, 8082)];
+        let candidates = vec![candidate("1", 8081), candidate("2", 8082)];
         let mut strategy = FirstBackendStrategy;
 
         let selected = strategy.select_backend(&candidates).unwrap();
@@ -65,7 +65,7 @@ mod tests {
 
     #[test]
     fn strategy_can_be_used_as_trait_object() {
-        let candidates = vec![candidate(1, 8081)];
+        let candidates = vec![candidate("1", 8081)];
         let mut strategy: Box<dyn BalancingStrategy> = Box::new(FirstBackendStrategy);
 
         let selected = strategy.select_backend(&candidates).unwrap();
