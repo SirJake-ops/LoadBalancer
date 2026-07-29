@@ -22,11 +22,14 @@ impl LoadBalancer {
         let mut service_tasks = JoinSet::new();
 
         for service in config.services {
-            service_tasks.spawn( async move {
+            service_tasks.spawn(async move {
                 let listener = TcpListener::bind(service.listener_address).await?;
                 let strategy = Self::strategy_for(service.strategy);
                 let backend_pool = BackendPool::new(service.backend_list);
-                let _health_checker = health::spawn_health_checker(backend_pool.clone(), service.health_check_interval);
+                let _health_checker = health::spawn_health_checker(
+                    backend_pool.clone(),
+                    service.health_check_interval,
+                );
                 println!("Listening on {}", listener.local_addr()?);
                 Self::serve_with_strategy(listener, backend_pool, strategy).await
             });
