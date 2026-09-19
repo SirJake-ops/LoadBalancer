@@ -21,7 +21,3 @@ strategy = "round_robin"
 backend_address = "127.0.0.1:8080"
 backend_id = "cpp-engine-1"
 weight = 1
-
-[services.health_check_interval]
-interval_seconds = 10
-timeout_seconds = 5

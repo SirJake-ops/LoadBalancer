@@ -1,15 +1,90 @@
 use crate::config::BackendConfig;
+use std::future::Future;
+use std::pin::Pin;
+use std::task::{Context, Poll};
 use tokio::io;
 use tokio::net::TcpStream;
+use tower::{Service, ServiceExt};
+
+#[derive(Clone)]
+pub struct TcpProxyService {
+    backend: BackendConfig,
+}
+
+impl TcpProxyService {
+    pub fn new(backend: BackendConfig) -> Self {
+        Self { backend }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ProxyError {
+    #[error("failed to connect to backend {backend_id}: {source}")]
+    Connect {
+        backend_id: String,
+        #[source]
+        source: io::Error,
+    },
+    #[error("I/O error while proxying to backend {backend_id}: {source}")]
+    Transfer {
+        backend_id: String,
+        #[source]
+        source: io::Error,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProxySummary {
+    pub bytes_from_client: u64,
+    pub bytes_from_backend: u64,
+}
+
+impl Service<TcpStream> for TcpProxyService {
+    type Response = ProxySummary;
+    type Error = ProxyError;
+    type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
+
+    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        // This service has no internal queue or concurrency limit, so it is
+        // always ready. A Tower concurrency layer can add backpressure later.
+        Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, mut client_stream: TcpStream) -> Self::Future {
+        let backend = self.backend.clone();
+
+        Box::pin(async move {
+            let mut backend_stream =
+                TcpStream::connect(backend.backend_address)
+                    .await
+                    .map_err(|source| ProxyError::Connect {
+                        backend_id: backend.backend_id.clone(),
+                        source,
+                    })?;
+
+            println!("Connected to backend {}", backend.backend_id);
+
+            let (bytes_from_client, bytes_from_backend) =
+                io::copy_bidirectional(&mut client_stream, &mut backend_stream)
+                    .await
+                    .map_err(|source| ProxyError::Transfer {
+                        backend_id: backend.backend_id,
+                        source,
+                    })?;
+
+            Ok(ProxySummary {
+                bytes_from_client,
+                bytes_from_backend,
+            })
+        })
+    }
+}
 
 pub async fn proxy_connection(
-    mut client_stream: TcpStream,
+    client_stream: TcpStream,
     backend: BackendConfig,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let mut backend_stream = TcpStream::connect(backend.backend_address).await?;
-    println!("Connected to backend {}", backend.backend_id);
-    io::copy_bidirectional(&mut client_stream, &mut backend_stream).await?;
-
+) -> Result<(), ProxyError> {
+    TcpProxyService::new(backend).oneshot(client_stream).await?;
     Ok(())
 }
 

@@ -2,11 +2,12 @@ use crate::balancing::{BalanceError, BalancingStrategy, LeastConnections, RoundR
 use crate::config::{BackendConfig, LoadBalancerConfig, StrategyKind};
 use crate::health;
 use crate::pool::BackendPool;
-use crate::proxy::proxy_connection;
+use crate::proxy::TcpProxyService;
 use std::future::Future;
 use std::path::Path;
 use tokio::net::TcpListener;
 use tokio::task::JoinSet;
+use tower::ServiceExt;
 
 pub struct LoadBalancer;
 
@@ -96,10 +97,12 @@ impl LoadBalancer {
                                 Some(guard) => {
                                     tasks.spawn(async move {
                                         let _pool_slot = guard;
+                                        let proxy = TcpProxyService::new(backend);
 
                                         println!("Proxy connection started for {}", client_addr);
 
-                                        if let Err(e) = proxy_connection(socket, backend).await {
+                                        // `oneshot` polls readiness before calling the service.
+                                        if let Err(e) = proxy.oneshot(socket).await {
                                             eprintln!("Proxy connection error for {}: {}", client_addr, e);
                                         }
 
