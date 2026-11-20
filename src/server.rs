@@ -534,6 +534,95 @@ timeout_seconds = 1
             .unwrap();
     }
 
+    async fn named_backend(listener: TcpListener, name: &'static [u8]) {
+        loop {
+            let (mut socket, _) = listener.accept().await.unwrap();
+
+            tokio::spawn(async move {
+                let mut buf = [0; 1024];
+                if socket.read(&mut buf).await.unwrap_or(0) == 0 {
+                    return;
+                }
+
+                let _ = socket.write_all(name).await;
+                while socket.read(&mut buf).await.unwrap_or(0) > 0 {}
+            });
+        }
+    }
+
+    async fn request(addr: SocketAddr) -> (TcpStream, [u8; 4]) {
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        client.write_all(b"ping").await.unwrap();
+        let mut reply = [0; 4];
+        client.read_exact(&mut reply).await.unwrap();
+
+        (client, reply)
+    }
+
+    async fn wait_for_active(pool: &BackendPool, id: &str, expected: usize) {
+        for _ in 0..50 {
+            if pool.active_connections(id) == Some(expected) {
+                return;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+
+        panic!("{id} never reached {expected} active connections");
+    }
+
+    #[tokio::test]
+    async fn least_connections_routes_new_clients_to_least_loaded_backend() {
+        let backend_1 = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let backend_2 = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let pool = BackendPool::new(vec![
+            backend("backend-1", backend_1.local_addr().unwrap().port()),
+            backend("backend-2", backend_2.local_addr().unwrap().port()),
+        ]);
+
+        let backend_one_task = tokio::spawn(named_backend(backend_1, b"bk-1"));
+        let backend_two_task = tokio::spawn(named_backend(backend_2, b"bk-2"));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+
+        let server = tokio::spawn(LoadBalancer::serve_with_strategy_until_shutdown(
+            listener,
+            pool.clone(),
+            Box::new(LeastConnections::new()),
+            async move { shutdown_rx.await.map_err(std::io::Error::other) },
+        ));
+
+        timeout(Duration::from_secs(2), async {
+            let (client_a, reply) = request(addr).await;
+            assert_eq!(&reply, b"bk-1");
+            assert_eq!(pool.active_connections("backend-1"), Some(1));
+
+            let (client_b, reply) = request(addr).await;
+            assert_eq!(&reply, b"bk-2");
+            drop(client_b);
+            wait_for_active(&pool, "backend-2", 0).await;
+
+            assert_eq!(pool.active_connections("backend-1"), Some(1));
+            let (client_c, reply) = request(addr).await;
+            assert_eq!(&reply, b"bk-2");
+            drop(client_a);
+            drop(client_c);
+            wait_for_active(&pool, "backend-1", 0).await;
+            wait_for_active(&pool, "backend-2", 0).await;
+        })
+        .await
+        .unwrap();
+
+        shutdown_tx.send(()).unwrap();
+        timeout(Duration::from_secs(2), server)
+            .await
+            .expect("server didn't shutdown")
+            .unwrap()
+            .unwrap();
+        backend_one_task.abort();
+        backend_two_task.abort();
+    }
+
     #[tokio::test]
     async fn test_server_stops_accepting_on_shutdown() {
         let server_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
