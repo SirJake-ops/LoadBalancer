@@ -544,7 +544,7 @@ timeout_seconds = 1
                     return;
                 }
 
-                let _ = socket.write(name).await;
+                let _ = socket.write_all(name).await;
                 while socket.read(&mut buf).await.unwrap_or(0) > 0 {}
             });
         }
@@ -571,7 +571,7 @@ timeout_seconds = 1
     }
 
     #[tokio::test]
-    async fn test_server_with_strategy_until_shutdown() {
+    async fn least_connections_routes_new_clients_to_least_loaded_backend() {
         let backend_1 = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let backend_2 = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let pool = BackendPool::new(vec![
@@ -602,10 +602,13 @@ timeout_seconds = 1
             drop(client_b);
             wait_for_active(&pool, "backend-2", 0).await;
 
+            assert_eq!(pool.active_connections("backend-1"), Some(1));
             let (client_c, reply) = request(addr).await;
             assert_eq!(&reply, b"bk-2");
             drop(client_a);
             drop(client_c);
+            wait_for_active(&pool, "backend-1", 0).await;
+            wait_for_active(&pool, "backend-2", 0).await;
         })
         .await
         .unwrap();
