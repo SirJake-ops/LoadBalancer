@@ -5,7 +5,9 @@ use crate::pool::BackendPool;
 use crate::proxy::TcpProxyService;
 use std::future::Future;
 use std::path::Path;
+use std::sync::Arc;
 use tokio::net::TcpListener;
+use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 use tower::ServiceExt;
 
@@ -67,66 +69,93 @@ impl LoadBalancer {
     pub(crate) async fn serve_with_strategy_until_shutdown(
         listener: TcpListener,
         pool: BackendPool,
-        mut strategy: Box<dyn BalancingStrategy>,
+        strategy: Box<dyn BalancingStrategy>,
         shutdown: impl Future<Output = std::io::Result<()>>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>> {
         tokio::pin!(shutdown);
 
         let mut tasks = JoinSet::new();
 
+        let strategy = Arc::new(Mutex::new(strategy));
+
         loop {
             tokio::select! {
-                accept_result = listener.accept() => {
-                    match accept_result {
-                        Ok((socket, client_addr)) => {
+            accept_result = listener.accept() => {
+                let Ok((socket, client_addr)) = accept_result else {
+                    continue
+                };
+                let pool = pool.clone();
+                let strategy = strategy.clone();
 
-                            let backend = match Self::select_backend_for_client(&pool, strategy.as_mut()) {
-                                Ok(backend) => backend,
-                                Err(BalanceError::NoBackendsAvailable) => {
-                                    eprintln!("No healthy backends; rejecting client {}", client_addr);
-                                    continue;
-                                }
-                            };
+                tasks.spawn(async move {
+                        let picked = {
+                            let mut s = strategy.lock().await;
+                            pool.select_and_acquire(s.as_mut())
+                        };
 
-                            println!(
-                                "Accepted connection from {}; selected backend {}",
-                                client_addr, backend.backend_id
-                            );
+                        let Ok((backend, _pool_slot)) = picked else {
+                            return;
+                        };
 
-                            match pool.try_acquire(&backend.backend_id) {
-                                Some(guard) => {
-                                    tasks.spawn(async move {
-                                        let _pool_slot = guard;
-                                        let proxy = TcpProxyService::new(backend);
-
-                                        println!("Proxy connection started for {}", client_addr);
-
-                                        // `oneshot` polls readiness before calling the service.
-                                        if let Err(e) = proxy.oneshot(socket).await {
-                                            eprintln!("Proxy connection error for {}: {}", client_addr, e);
-                                        }
-
-                                        println!("Proxy connection ended for {}", client_addr);
-                                    });
-                                }
-                                None => {
-                                    eprintln!("Backend unavailable! Rejecting client connection from {}", client_addr);
-                                }
-                            }
+                        if let Err(e) = TcpProxyService::new(backend).oneshot(socket).await {
+                            eprintln!("Proxy error for {client_addr}: {e}");
                         }
-                        Err(e) => {
-                            eprintln!("Failed to accept incoming connection: {}", e);
-                        }
-                    }
+                });
                 }
+
+                Some(res) = tasks.join_next(), if !tasks.is_empty() => {
+                    if let Err(e) = res { eprintln!("connection task failed: {e}");}
+                }
+
                 shutdown_result = &mut shutdown => {
                     shutdown_result?;
                     println!("Shutdown signal received; stopping listener");
                     break;
                 }
+
+                // match accept_result {
+                //     Ok((socket, client_addr)) => {
+                //
+                //         let backend = match Self::select_backend_for_client(&pool, strategy.as_mut()) {
+                //             Ok(backend) => backend,
+                //             Err(BalanceError::NoBackendsAvailable) => {
+                //                 eprintln!("No healthy backends; rejecting client {}", client_addr);
+                //                 continue;
+                //             }
+                //         };
+                //
+                //         println!(
+                //             "Accepted connection from {}; selected backend {}",
+                //             client_addr, backend.backend_id
+                //         );
+                //
+                //         match pool.try_acquire(&backend.backend_id) {
+                //             Some(guard) => {
+                //                 tasks.spawn(async move {
+                //                     let _pool_slot = guard;
+                //                     let proxy = TcpProxyService::new(backend);
+                //
+                //                     println!("Proxy connection started for {}", client_addr);
+                //
+                //                     // `oneshot` polls readiness before calling the service.
+                //                     if let Err(e) = proxy.oneshot(socket).await {
+                //                         eprintln!("Proxy connection error for {}: {}", client_addr, e);
+                //                     }
+                //
+                //                     println!("Proxy connection ended for {}", client_addr);
+                //                 });
+                //             }
+                //             None => {
+                //                 eprintln!("Backend unavailable! Rejecting client connection from {}", client_addr);
+                //             }
+                //         }
+                //     }
+                //     Err(e) => {
+                //         eprintln!("Failed to accept incoming connection: {}", e);
+                //     }
+                // }
             }
         }
-
         while let Some(result) = tasks.join_next().await {
             result?;
         }
