@@ -1,3 +1,4 @@
+use crate::balancing::{BalanceError, BalancingStrategy};
 use crate::config::{BackendCandidate, BackendConfig};
 use std::sync::{Arc, Mutex};
 
@@ -72,6 +73,38 @@ impl BackendPool {
     pub fn backends(&self) -> Vec<BackendConfig> {
         let state = self.inner.lock().unwrap();
         state.iter().map(|backend| backend.config.clone()).collect()
+    }
+
+    pub fn select_and_acquire(
+        &self,
+        strategy: &mut dyn BalancingStrategy,
+    ) -> Result<(BackendConfig, BackendGuard), BalanceError> {
+        let mut state = self.inner.lock().unwrap();
+
+        let candidates: Vec<BackendCandidate> = state
+            .iter()
+            .filter(|b| b.healthy)
+            .map(|b| BackendCandidate {
+                backend: b.config.clone(),
+                active_connections: b.active_connections,
+            })
+            .collect();
+
+        let chosen = strategy.select_backend(&candidates)?;
+        let slot = state
+            .iter_mut()
+            .find(|b| b.config.backend_id == chosen.backend_id)
+            .expect("chosen backend came from the this state");
+
+        slot.active_connections += 1;
+
+        Ok((
+            chosen.clone(),
+            BackendGuard {
+                inner: self.inner.clone(),
+                backend_id: chosen.backend_id,
+            },
+        ))
     }
 
     #[cfg(test)]
